@@ -1,4 +1,3 @@
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import csv
@@ -99,25 +98,24 @@ def compute_gradient(T: np.ndarray, y: np.ndarray, exclude: int = 2):
     return dTdy, y_inner, T_inner
 
 
-def determine_heat_flux(args: argparse.Namespace) -> float:
-    # If q is provided
-    if args.heat_flux_q is not None:
-        if args.q_is_magnitude:
-            if args.flux_dir is None:
-                # Interactive fallback
+def determine_heat_flux() -> float:
+    # If q is provided directly
+    if HEAT_FLUX_Q is not None:
+        if Q_IS_MAGNITUDE:
+            if FLUX_DIR is None:
                 resp = input("Heat flux direction along coord ('+' or '-') [required]: ").strip()
                 if resp not in {"+", "-"}:
                     raise ValueError("Invalid flux direction input")
                 direction = 1.0 if resp == "+" else -1.0
             else:
-                direction = 1.0 if args.flux_dir == "+" else -1.0
-            return direction * float(args.heat_flux_q)
+                direction = 1.0 if FLUX_DIR == "+" else -1.0
+            return direction * float(HEAT_FLUX_Q)
         else:
-            return float(args.heat_flux_q)
+            return float(HEAT_FLUX_Q)
 
     # Else compute from power and area
-    power = args.power_w
-    area = args.area_m2
+    power = POWER_W
+    area = AREA_M2
     if power is None:
         resp = input("Total power in W (or leave blank if not using power): ").strip()
         power = float(resp) if resp else None
@@ -126,30 +124,28 @@ def determine_heat_flux(args: argparse.Namespace) -> float:
         area = float(resp) if resp else None
     if power is not None and area is not None:
         q_mag = float(power) / float(area)
-        if args.flux_dir is None:
+        if FLUX_DIR is None:
             resp = input("Heat flux direction along coord ('+' or '-') [required]: ").strip()
             if resp not in {"+", "-"}:
                 raise ValueError("Invalid flux direction input")
             direction = 1.0 if resp == "+" else -1.0
         else:
-            direction = 1.0 if args.flux_dir == "+" else -1.0
+            direction = 1.0 if FLUX_DIR == "+" else -1.0
         return direction * q_mag
 
-    raise ValueError("Provide --heat-flux-q (optionally with --q-is-magnitude/--flux-dir) or both --power-w and --area-m2.")
+    raise ValueError("Provide HEAT_FLUX_Q (optionally with Q_IS_MAGNITUDE/FLUX_DIR) or both POWER_W and AREA_M2.")
 
 
 def main():
-    args = parse_args()
-
     # 1. Read input profile
-    timesteps, coords, T_matrix = read_profile(args.file_path)
+    timesteps, coords, T_matrix = read_profile(FILE_PATH)
 
     # 2. Steady-state selection
-    T_avg, T_last = select_steady_region(timesteps, T_matrix, args.steady_threshold)
+    T_avg, T_last = select_steady_region(timesteps, T_matrix, STEADY_THRESHOLD)
 
     # 3. Gradients (inner bins)
-    grad_avg, coords_inner, T_avg_inner = compute_gradient(T_avg, coords, args.exclude_bins)
-    grad_last, _, T_last_inner = compute_gradient(T_last, coords, args.exclude_bins)
+    grad_avg, coords_inner, T_avg_inner = compute_gradient(T_avg, coords, EXCLUDE_BINS)
+    grad_last, _, T_last_inner = compute_gradient(T_last, coords, EXCLUDE_BINS)
 
     # 4. Overall linear fits on inner bins
     coeffs_avg = np.polyfit(coords_inner, T_avg_inner, 1)
@@ -158,23 +154,18 @@ def main():
     overall_grad_last = coeffs_last[0]
 
     # 5. Convert gradients to per-meter using coord unit scale
-    scale_m_per_unit = float(args.coord_unit_m)
+    scale_m_per_unit = float(COORD_UNIT_M)
     if scale_m_per_unit <= 0:
-        raise ValueError("--coord-unit-m must be positive")
+        raise ValueError("COORD_UNIT_M must be positive")
     grad_avg_per_m = grad_avg / scale_m_per_unit
     grad_last_per_m = grad_last / scale_m_per_unit
     overall_grad_avg_per_m = overall_grad_avg / scale_m_per_unit
     overall_grad_last_per_m = overall_grad_last / scale_m_per_unit
 
     # 6. Manual heat flux input
-    try:
-        q_w_per_m2 = determine_heat_flux(args)
-    except Exception as e:
-        print(f"Error determining heat flux: {e}")
-        sys.exit(1)
+    q_w_per_m2 = determine_heat_flux()
 
     # 7. Thermal conductivity via Fourier's law: q = -k dT/dy
-    # Handle potential divide-by-zero gracefully
     with np.errstate(divide='ignore', invalid='ignore'):
         k_local_avg = -q_w_per_m2 / grad_avg_per_m
         k_local_last = -q_w_per_m2 / grad_last_per_m
@@ -184,9 +175,9 @@ def main():
     # 8. Print summary
     print(f"(A) Overall gradient (avg steady, per meter): {overall_grad_avg_per_m:.6g} K/m")
     print(f"(B) Overall gradient (last step, per meter): {overall_grad_last_per_m:.6g} K/m")
-    if args.use_profile in {"avg", "both"}:
+    if USE_PROFILE in {"avg", "both"}:
         print(f"(C) Thermal conductivity using avg steady profile: {k_overall_avg:.6g} W/m-K")
-    if args.use_profile in {"last", "both"}:
+    if USE_PROFILE in {"last", "both"}:
         print(f"(D) Thermal conductivity using last timestep profile: {k_overall_last:.6g} W/m-K")
 
     # 9. Save per-bin results (inner bins only)
@@ -194,7 +185,7 @@ def main():
         "coord_unit", "coord_m", "T_avg", "T_last", "grad_avg_K_per_m", "grad_last_K_per_m",
         "k_local_avg_W_per_mK", "k_local_last_W_per_mK"
     ]
-    with open(args.output_csv, "w", newline="") as f:
+    with open(OUTPUT_CSV, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
         for y_unit, Ta, Tl, ga, gl, ka, kl in zip(
@@ -216,10 +207,10 @@ def main():
                 ka,
                 kl,
             ])
-    print(f"Per-bin results saved to {args.output_csv}")
+    print(f"Per-bin results saved to {OUTPUT_CSV}")
 
     # 10. Plots (inner bins only)
-    if not args.no_plots:
+    if SHOW_PLOTS:
         plt.figure(figsize=(6, 4))
         plt.plot(coords_inner, T_avg_inner, 'o-', label='Average (steady-state)')
         plt.plot(coords_inner, T_last_inner, 's--', label='Last timestep')
