@@ -1,54 +1,33 @@
-import argparse
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import csv
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Compute temperature gradients and thermal conductivity from a LAMMPS "
-            "chunk-averaged profile, with manual inputs for heat flux or power/area."
-        )
-    )
+# -------------------------------
+# USER SETTINGS (edit these directly)
+# -------------------------------
+FILE_PATH = "profile1.mp"          # Input LAMMPS chunk-averaged profile
+OUTPUT_CSV = "temperature_gradients.csv"
+STEADY_THRESHOLD = 2e6             # Timesteps >= this are considered steady state
+EXCLUDE_BINS = 2                   # Number of bins to exclude at each edge
 
-    # I/O
-    parser.add_argument("--file", dest="file_path", type=str, default="profile1.mp",
-                        help="Input LAMMPS chunk-averaged profile file path")
-    parser.add_argument("--out-csv", dest="output_csv", type=str, default="temperature_gradients.csv",
-                        help="Output CSV for per-bin results (gradients and k)")
+# Spatial coordinate scaling to meters (e.g., nm -> 1e-9, Angstrom -> 1e-10)
+COORD_UNIT_M = 1.0
 
-    # Steady-state selection and bin trimming
-    parser.add_argument("--steady-threshold", type=float, default=2e6,
-                        help="Timesteps >= this are considered steady-state")
-    parser.add_argument("--exclude-bins", type=int, default=2,
-                        help="Number of bins to exclude at each edge")
+# Heat flux input (choose ONE path)
+# Path 1: Provide q directly in W/m^2 (signed); or as magnitude with direction
+HEAT_FLUX_Q = None                 # e.g., -1.2e9 for signed q (None means not provided)
+Q_IS_MAGNITUDE = False             # If True, interpret HEAT_FLUX_Q as magnitude
+FLUX_DIR = None                    # '+' or '-', used when magnitude is provided or when computing from power
 
-    # Coordinate unit scaling
-    parser.add_argument("--coord-unit-m", type=float, default=1.0,
-                        help=(
-                            "Meters per coordinate unit in the input profile (e.g., if coords are in nm, set 1e-9)"
-                        ))
+# Path 2: Provide power and area to compute q = P/A
+POWER_W = None                     # Total heating/cooling power in W (None if unused)
+AREA_M2 = None                     # Cross-sectional area in m^2 (None if unused)
 
-    # Heat flux / power input
-    parser.add_argument("--heat-flux-q", type=float, default=None,
-                        help="Heat flux q in W/m^2. Signed by default unless --q-is-magnitude is set")
-    parser.add_argument("--q-is-magnitude", action="store_true",
-                        help="Interpret --heat-flux-q as a magnitude; use --flux-dir for sign")
-    parser.add_argument("--power-w", type=float, default=None,
-                        help="Total heating/cooling power in Watts")
-    parser.add_argument("--area-m2", type=float, default=None,
-                        help="Cross-sectional area in m^2 (used with --power-w to compute flux)")
-    parser.add_argument("--flux-dir", type=str, choices=["+", "-"], default=None,
-                        help="Direction of heat flow along the coordinate axis: '+' or '-' (used if magnitude is provided)")
-
-    # Which profile to use for reporting
-    parser.add_argument("--use-profile", type=str, choices=["avg", "last", "both"], default="both",
-                        help="Report conductivity using steady-state average, last timestep, or both")
-    parser.add_argument("--no-plots", action="store_true", help="Disable plotting")
-
-    return parser.parse_args()
+# Reporting/plot options
+USE_PROFILE = "both"               # 'avg', 'last', or 'both'
+SHOW_PLOTS = True                  # Set to False to disable plots
 
 
 def read_profile(file_path: str):
