@@ -28,6 +28,18 @@ AREA_M2 = None                     # Cross-sectional area in m^2 (None if unused
 USE_PROFILE = "both"               # 'avg', 'last', or 'both'
 SHOW_PLOTS = True                  # Set to False to disable plots
 
+# Optional: read heat flux or power directly from a LAMMPS log file
+LOG_FILE_PATH = None               # e.g., "log.lammps" (None disables log-based extraction)
+LOG_COLUMN_NAME = None             # Thermo column containing heat flux (W/m^2) or power (W)
+LOG_MODE = "auto"                  # 'flux', 'power', or 'auto'
+LOG_Q_IS_MAGNITUDE = False         # If True, interpret log column as magnitude; use LOG_FLUX_DIR for sign
+LOG_FLUX_DIR = None                # '+' or '-', used when magnitude is provided
+LOG_STEADY_THRESHOLD = None        # If None, reuse STEADY_THRESHOLD; else use this step threshold for log averaging
+
+
+# -------------------------------
+# I/O helpers
+# -------------------------------
 
 def read_profile(file_path: str):
     timesteps = []
@@ -71,7 +83,6 @@ def read_profile(file_path: str):
 def select_steady_region(timesteps: np.ndarray, T_matrix: np.ndarray, steady_threshold: float):
     steady_mask = timesteps >= steady_threshold
     if not np.any(steady_mask):
-        # Fallback: if no timesteps beyond threshold, use the last 1/3 of frames
         cutoff_index = int(2 * len(timesteps) / 3)
         steady_mask = np.zeros_like(timesteps, dtype=bool)
         steady_mask[cutoff_index:] = True
@@ -98,8 +109,112 @@ def compute_gradient(T: np.ndarray, y: np.ndarray, exclude: int = 2):
     return dTdy, y_inner, T_inner
 
 
+# -------------------------------
+# LAMMPS log parsing helpers (optional)
+# -------------------------------
+
+def _is_numeric_row(tokens):
+    if len(tokens) == 0:
+        return False
+    for token in tokens:
+        try:
+            float(token)
+        except ValueError:
+            return False
+    return True
+
+
+def parse_lammps_log_tables(log_path: str):
+    tables = []
+    with open(log_path, "r") as f:
+        lines = [ln.rstrip() for ln in f]
+
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        tokens = line.split()
+        if tokens and (tokens[0] == "Step" or not _is_numeric_row(tokens)):
+            if i + 1 < len(lines):
+                next_tokens = lines[i + 1].split()
+                if _is_numeric_row(next_tokens):
+                    headers = tokens
+                    rows = []
+                    j = i + 1
+                    while j < len(lines):
+                        row_tokens = lines[j].split()
+                        if _is_numeric_row(row_tokens) and len(row_tokens) == len(headers):
+                            rows.append([float(x) for x in row_tokens])
+                            j += 1
+                            continue
+                        break
+                    if rows:
+                        tables.append({
+                            "headers": headers,
+                            "rows": np.array(rows, dtype=float)
+                        })
+                        i = j
+                        continue
+        i += 1
+    return tables
+
+
+def extract_series_from_log(log_path: str, column_name: str):
+    tables = parse_lammps_log_tables(log_path)
+    for tbl in tables:
+        headers = tbl["headers"]
+        if column_name in headers:
+            col_idx = headers.index(column_name)
+            step_idx = headers.index("Step") if "Step" in headers else None
+            rows = tbl["rows"]
+            steps = rows[:, step_idx] if step_idx is not None else np.arange(rows.shape[0])
+            series = rows[:, col_idx]
+            return steps, series
+    raise ValueError(f"Column '{column_name}' not found in any thermo table of {log_path}")
+
+
+def average_log_series(steps: np.ndarray, series: np.ndarray, steady_threshold: float) -> float:
+    mask = steps >= steady_threshold
+    if not np.any(mask):
+        start = int(2 * len(series) / 3)
+        return float(np.mean(series[start:]))
+    return float(np.mean(series[mask]))
+
+
+# -------------------------------
+# Heat flux determination
+# -------------------------------
+
 def determine_heat_flux() -> float:
-    # If q is provided directly
+    # 0) Try to determine q from log file if configured
+    if LOG_FILE_PATH and LOG_COLUMN_NAME:
+        steps, values = extract_series_from_log(LOG_FILE_PATH, LOG_COLUMN_NAME)
+        thresh = LOG_STEADY_THRESHOLD if LOG_STEADY_THRESHOLD is not None else STEADY_THRESHOLD
+        avg_val = average_log_series(steps, values, float(thresh))
+        mode = (LOG_MODE or "auto").lower()
+        if LOG_Q_IS_MAGNITUDE:
+            if LOG_FLUX_DIR is None:
+                resp = input("Heat flux direction along coord from log ('+' or '-') [required]: ").strip()
+                if resp not in {"+", "-"}:
+                    raise ValueError("Invalid flux direction input")
+                direction = 1.0 if resp == "+" else -1.0
+            else:
+                direction = 1.0 if LOG_FLUX_DIR == "+" else -1.0
+            signed_val = direction * abs(avg_val)
+        else:
+            signed_val = avg_val
+        if mode == "flux":
+            return float(signed_val)
+        if mode == "power":
+            if AREA_M2 is None or AREA_M2 == 0:
+                raise ValueError("AREA_M2 must be set and non-zero when LOG_MODE='power'")
+            return float(signed_val) / float(AREA_M2)
+        # auto: default to interpreting column as flux
+        return float(signed_val)
+
+    # 1) If q is provided directly
     if HEAT_FLUX_Q is not None:
         if Q_IS_MAGNITUDE:
             if FLUX_DIR is None:
@@ -113,7 +228,7 @@ def determine_heat_flux() -> float:
         else:
             return float(HEAT_FLUX_Q)
 
-    # Else compute from power and area
+    # 2) Else compute from power and area
     power = POWER_W
     area = AREA_M2
     if power is None:
@@ -133,8 +248,12 @@ def determine_heat_flux() -> float:
             direction = 1.0 if FLUX_DIR == "+" else -1.0
         return direction * q_mag
 
-    raise ValueError("Provide HEAT_FLUX_Q (optionally with Q_IS_MAGNITUDE/FLUX_DIR) or both POWER_W and AREA_M2.")
+    raise ValueError("Provide one of: log-based settings (LOG_FILE_PATH & LOG_COLUMN_NAME), HEAT_FLUX_Q, or both POWER_W and AREA_M2.")
 
+
+# -------------------------------
+# Main
+# -------------------------------
 
 def main():
     # 1. Read input profile
@@ -162,7 +281,7 @@ def main():
     overall_grad_avg_per_m = overall_grad_avg / scale_m_per_unit
     overall_grad_last_per_m = overall_grad_last / scale_m_per_unit
 
-    # 6. Manual heat flux input
+    # 6. Determine heat flux
     q_w_per_m2 = determine_heat_flux()
 
     # 7. Thermal conductivity via Fourier's law: q = -k dT/dy
@@ -247,4 +366,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
